@@ -1,5 +1,100 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Search, Plus, Edit2, Trash2, Star, Shuffle, Volume2, X, Moon, Sun, BookOpen, Brain, Sparkles, ChevronLeft, ChevronRight, Target, Flame, TrendingUp, Library as LibraryIcon, ArrowLeft, Wand2, Loader } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, Star, Shuffle, Volume2, X, Moon, Sun, BookOpen, Brain, Sparkles, ChevronLeft, ChevronRight, Target, Flame, TrendingUp, Library as LibraryIcon, ArrowLeft, Wand2, Loader, Settings, Key, CheckCircle } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+
+// ── Firebase setup ────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyAvh-m7Xig7YYlW2YLOuREj9QbU2_2Sw2w",
+  authDomain: "vocabulary-app-491d9.firebaseapp.com",
+  projectId: "vocabulary-app-491d9",
+  storageBucket: "vocabulary-app-491d9.firebasestorage.app",
+  messagingSenderId: "787827046297",
+  appId: "1:787827046297:web:e76cdffb31662bf3798508",
+  measurementId: "G-69H9THXTK5"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+// Single document that holds all cards — cheap reads, no per-card overhead
+const CARDS_DOC = doc(db, 'lexicon', 'cards');
+const MAX_CARDS = 1000;
+
+async function loadFromFirebase() {
+  const snap = await getDoc(CARDS_DOC);
+  if (snap.exists()) {
+    const data = snap.data();
+    if (Array.isArray(data.cards)) return data.cards;
+  }
+  return [];
+}
+
+async function saveToFirebase(cards) {
+  await setDoc(CARDS_DOC, { cards, updatedAt: Date.now() });
+}
+
+// ── API key stored in localStorage (device only, never sent anywhere) ─
+const API_KEY_STORAGE = 'lexicon_api_key';
+function getApiKey() { return localStorage.getItem(API_KEY_STORAGE) || ''; }
+function saveApiKey(k) { localStorage.setItem(API_KEY_STORAGE, k); }
+
+// ── Claude API calls ──────────────────────────────────────
+async function lookupWord(word, apiKey) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 800,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{
+        role: 'user',
+        content: `Look up the English word "${word}" and return its definitions as a JSON array. Each item must have: "pos" (one of: noun, verb, adjective, adverb, pronoun, preposition, conjunction, interjection), "meaning" (plain English definition), "example" (one short example sentence or empty string). Up to 3 definitions. Output ONLY the raw JSON array, no markdown, no backticks, no explanation.`,
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `API error ${res.status}`);
+  }
+  const data = await res.json();
+  const textBlock = [...(data.content || [])].reverse().find(b => b.type === 'text');
+  if (!textBlock?.text) throw new Error('No response from API');
+  const raw = textBlock.text.trim().replace(/^```[a-z]*\n?/, '').replace(/```$/, '').trim();
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.length) throw new Error('Empty result');
+  return parsed;
+}
+
+async function generateExample(word, pos, meaning, apiKey) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: `Write exactly 2 clear, natural example sentences for the word "${word}" used as a ${pos} (meaning: ${meaning}). Output only the 2 sentences, one per line, no numbering, no extra text.` }],
+    }),
+  });
+  if (!res.ok) throw new Error('API error');
+  const data = await res.json();
+  return data.content?.[0]?.text?.trim() || '';
+}
+
+// ── SM-2 ──────────────────────────────────────────────────
+function nextReview(card, quality) {
+  const now = Date.now();
+  let { interval = 0, ease = 2.5, reps = 0 } = card.srs || {};
+  if (quality < 3) { reps = 0; interval = 1; }
+  else {
+    if (reps === 0) interval = 1;
+    else if (reps === 1) interval = 3;
+    else interval = Math.round(interval * ease);
+    reps += 1;
+    ease = Math.max(1.3, ease + 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+  }
+  return { interval, ease, reps, dueAt: now + interval * 86400000, lastReviewed: now };
+}
 
 const POS_OPTIONS = ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection'];
 const POS_COLORS = {
@@ -12,10 +107,7 @@ const POS_COLORS = {
   conjunction:  { bg: '#E8D4E0', text: '#5C2D4A', accent: '#A04A80' },
   interjection: { bg: '#E8E4D0', text: '#5C5430', accent: '#A09040' },
 };
-const STORAGE_KEY = 'lexicon_cards_v1';
-const MAX_CARDS   = 1000;
 
-// ── CSS injected via JS — keeps Vite/PostCSS away from template literals ──
 function useThemeStyles(theme, dark) {
   useEffect(() => {
     const id = 'lexicon-styles';
@@ -56,87 +148,6 @@ function useThemeStyles(theme, dark) {
   }, [theme, dark]);
 }
 
-// ── Storage ───────────────────────────────────────────────
-function loadCards() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p; }
-  } catch (_) {}
-  return [];
-}
-
-// ── Lookup + example via Claude API (web_search enabled) ──
-// Returns array of { pos, meaning, example }
-async function lookupWord(word) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 800,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: `Look up the English word "${word}" in a dictionary and return its definitions.
-
-Respond ONLY with a JSON array (no markdown, no backticks, no extra text) where each item has:
-- "pos": part of speech (one of: noun, verb, adjective, adverb, pronoun, preposition, conjunction, interjection)
-- "meaning": clear definition in plain English
-- "example": one short example sentence using the word (or empty string if none)
-
-Include up to 3 most common definitions. Example format:
-[{"pos":"noun","meaning":"A feeling of great happiness","example":"She felt pure joy when she heard the news."}]`
-      }],
-    }),
-  });
-  if (!res.ok) throw new Error('API error');
-  const data = await res.json();
-
-  // Find the final text response (after any tool use)
-  const textBlock = [...(data.content || [])].reverse().find(b => b.type === 'text');
-  if (!textBlock?.text) throw new Error('No response');
-
-  // Strip any accidental markdown fences
-  const raw = textBlock.text.trim().replace(/^```[a-z]*\n?/, '').replace(/```$/, '').trim();
-  const parsed = JSON.parse(raw);
-  if (!Array.isArray(parsed) || !parsed.length) throw new Error('Empty');
-  return parsed;
-}
-
-async function generateExample(word, pos, meaning) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 200,
-      messages: [{
-        role: 'user',
-        content: `Write exactly 2 clear, natural example sentences for the word "${word}" used as a ${pos} (meaning: ${meaning}).
-Output only the 2 sentences, one per line, no numbering, no extra text.`,
-      }],
-    }),
-  });
-  if (!res.ok) throw new Error('API error');
-  const data = await res.json();
-  return data.content?.[0]?.text?.trim() || '';
-}
-
-// ── SM-2 ──────────────────────────────────────────────────
-function nextReview(card, quality) {
-  const now = Date.now();
-  let { interval = 0, ease = 2.5, reps = 0 } = card.srs || {};
-  if (quality < 3) { reps = 0; interval = 1; }
-  else {
-    if (reps === 0) interval = 1;
-    else if (reps === 1) interval = 3;
-    else interval = Math.round(interval * ease);
-    reps += 1;
-    ease = Math.max(1.3, ease + 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-  }
-  return { interval, ease, reps, dueAt: now + interval * 86400000, lastReviewed: now };
-}
-
 function MultilineText({ text, italic = true }) {
   if (!text) return null;
   return (
@@ -152,6 +163,7 @@ function MultilineText({ text, italic = true }) {
 export default function App() {
   const [cards, setCards]             = useState([]);
   const [loading, setLoading]         = useState(true);
+  const [syncStatus, setSyncStatus]   = useState('idle'); // idle | saving | saved | error
   const [view, setView]               = useState('library');
   const [dark, setDark]               = useState(false);
   const [search, setSearch]           = useState('');
@@ -159,11 +171,13 @@ export default function App() {
   const [filterFav, setFilterFav]     = useState(false);
   const [showForm, setShowForm]       = useState(false);
   const [editingCard, setEditingCard] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [studyDeck, setStudyDeck]     = useState([]);
   const [studyIdx, setStudyIdx]       = useState(0);
   const [flipped, setFlipped]         = useState(false);
   const [toast, setToast]             = useState(null);
   const saveTimer = useRef(null);
+  const isFirstLoad = useRef(true);
 
   const theme = dark ? {
     bg: '#1a1612', surface: '#241e18', surfaceAlt: '#2d2620',
@@ -177,41 +191,38 @@ export default function App() {
 
   useThemeStyles(theme, dark);
 
+  // Load from Firebase on mount
   useEffect(() => {
-    try {
-      const loaded = loadCards();
-      setCards(loaded.sort((a, b) => b.createdAt - a.createdAt));
-    } catch(e) { console.error(e); }
-    finally { setLoading(false); }
+    loadFromFirebase()
+      .then(loaded => setCards(loaded.sort((a, b) => b.createdAt - a.createdAt)))
+      .catch(e => { console.error(e); showToast('Could not load from cloud — check connection'); })
+      .finally(() => setLoading(false));
   }, []);
 
+  // Auto-save to Firebase whenever cards change (debounced 800ms)
   useEffect(() => {
     if (loading) return;
+    if (isFirstLoad.current) { isFirstLoad.current = false; return; }
+    setSyncStatus('saving');
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cards)); } catch (_) { showToast('Save failed'); }
-    }, 400);
+      saveToFirebase(cards)
+        .then(() => { setSyncStatus('saved'); setTimeout(() => setSyncStatus('idle'), 2000); })
+        .catch(() => { setSyncStatus('error'); showToast('Cloud save failed — check connection'); });
+    }, 800);
     return () => clearTimeout(saveTimer.current);
   }, [cards, loading]);
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2600); };
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); };
 
   const addCard = (data) => {
     if (cards.length >= MAX_CARDS) { showToast('Limit reached (1000 words)'); return; }
-    const card = {
-      ...data,
-      id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
-      createdAt: Date.now(), favorite: false, srs: null,
-    };
+    const card = { ...data, id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), createdAt: Date.now(), favorite: false, srs: null };
     setCards(prev => [card, ...prev]);
     showToast('Card saved');
   };
 
-  const updateCard = (updated) => {
-    setCards(prev => prev.map(c => c.id === updated.id ? updated : c));
-    showToast('Card updated');
-  };
-
+  const updateCard = (updated) => { setCards(prev => prev.map(c => c.id === updated.id ? updated : c)); showToast('Card updated'); };
   const deleteCard  = (id)   => { setCards(prev => prev.filter(c => c.id !== id)); showToast('Card deleted'); };
   const toggleFav   = (card) => { setCards(prev => prev.map(c => c.id === card.id ? { ...c, favorite: !c.favorite } : c)); };
 
@@ -245,45 +256,40 @@ export default function App() {
     if (mode === 'due')           deck = deck.filter(c => !c.srs?.dueAt || c.srs.dueAt <= now);
     else if (mode === 'favorites') deck = deck.filter(c => c.favorite);
     if (!deck.length) { showToast('No cards in this set'); return; }
-    for (let i = deck.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [deck[i], deck[j]] = [deck[j], deck[i]];
-    }
+    for (let i = deck.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [deck[i], deck[j]] = [deck[j], deck[i]]; }
     setStudyDeck(deck); setStudyIdx(0); setFlipped(false); setView('study');
   };
 
-  const startQuiz = () => {
-    if (cards.length < 4) { showToast('Need at least 4 cards for quiz'); return; }
-    setView('quiz');
+  const startQuiz = () => { if (cards.length < 4) { showToast('Need at least 4 cards for quiz'); return; } setView('quiz'); };
+  const speak = (text) => {
+    if ('speechSynthesis' in window) { window.speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 0.9; window.speechSynthesis.speak(u); }
   };
 
-  const speak = (text) => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 0.9;
-      window.speechSynthesis.speak(u);
-    }
-  };
+  // Sync indicator label
+  const syncLabel = syncStatus === 'saving' ? '↑ Saving…' : syncStatus === 'saved' ? '✓ Synced' : syncStatus === 'error' ? '✗ Sync failed' : '';
+  const syncColor = syncStatus === 'error' ? '#c1666b' : syncStatus === 'saved' ? '#4A7C4A' : theme.textMuted;
 
   return (
     <div style={{ minHeight: '100vh', background: theme.bg, color: theme.text, fontFamily: '"Cormorant Garamond","EB Garamond",Georgia,serif', transition: 'background 0.4s,color 0.4s' }}>
       <div className="paper-bg" style={{ minHeight: '100vh' }}>
 
-        {/* HEADER */}
         <header style={{ borderBottom: `1px solid ${theme.border}`, background: theme.surface }}>
           <div style={{ maxWidth: 1200, margin: '0 auto', padding: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', cursor: 'pointer' }} onClick={() => setView('library')}>
               <div style={{ width: 44, height: 44, background: theme.accent, color: dark ? '#1a1612' : '#fdf9ef', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'Fraunces,serif', fontWeight: 700, fontSize: '1.4rem', fontStyle: 'italic' }}>L</div>
               <div>
                 <h1 className="display-font" style={{ margin: 0, fontSize: '1.7rem', fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1 }}>Lexicon</h1>
-                <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 4 }}>a vocabulary journal</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 4 }}>a vocabulary journal</div>
+                  {syncLabel && <div className="mono-font" style={{ fontSize: '0.6rem', letterSpacing: '0.1em', color: syncColor, marginTop: 4 }}>{syncLabel}</div>}
+                </div>
               </div>
             </div>
             <nav style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn hide-mobile" onClick={() => setView('library')} style={view === 'library' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><BookOpen size={15} /> Library</button>
               <button className="btn hide-mobile" onClick={() => setView('collection')} style={view === 'collection' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><LibraryIcon size={15} /> Collection</button>
               <button className="btn hide-mobile" onClick={() => setView('stats')} style={view === 'stats' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><TrendingUp size={15} /> Progress</button>
+              <button className="btn" onClick={() => setShowSettings(true)} title="Settings"><Settings size={15} /></button>
               <button className="btn" onClick={() => setDark(!dark)}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
               <button className="btn btn-primary" onClick={() => { setEditingCard(null); setShowForm(true); }} disabled={cards.length >= MAX_CARDS}><Plus size={15} /> New</button>
             </nav>
@@ -298,31 +304,27 @@ export default function App() {
           )}
         </header>
 
-        {/* MAIN */}
         <main style={{ maxWidth: 1200, margin: '0 auto', padding: '2rem 1.5rem' }}>
           {loading ? (
             <div style={{ textAlign: 'center', padding: '4rem', color: theme.textMuted }}>
-              <div className="display-font" style={{ fontSize: '1.5rem', fontStyle: 'italic' }}>Opening journal…</div>
+              <Loader size={24} className="spin" style={{ marginBottom: '1rem' }} />
+              <div className="display-font" style={{ fontSize: '1.5rem', fontStyle: 'italic' }}>Loading from cloud…</div>
             </div>
           ) : view === 'library' ? (
-            <Library
-              cards={cards} filtered={filtered} theme={theme} dark={dark}
+            <Library cards={cards} filtered={filtered} theme={theme} dark={dark}
               search={search} setSearch={setSearch} filterPOS={filterPOS} setFilterPOS={setFilterPOS}
               filterFav={filterFav} setFilterFav={setFilterFav}
               onEdit={c => { setEditingCard(c); setShowForm(true); }}
               onDelete={deleteCard} onToggleFav={toggleFav} onSpeak={speak}
-              onStudy={startStudy} onQuiz={startQuiz} onCollection={() => setView('collection')} dueCount={dueCount}
-            />
+              onStudy={startStudy} onQuiz={startQuiz} onCollection={() => setView('collection')} dueCount={dueCount} />
           ) : view === 'collection' ? (
             <CollectionView cards={cards} theme={theme} dark={dark} onBack={() => setView('library')} onQuiz={startQuiz} />
           ) : view === 'study' ? (
-            <StudyView
-              card={studyDeck[studyIdx]} idx={studyIdx} total={studyDeck.length}
+            <StudyView card={studyDeck[studyIdx]} idx={studyIdx} total={studyDeck.length}
               flipped={flipped} setFlipped={setFlipped} theme={theme} dark={dark}
               onRate={applyRating} onExit={() => setView('library')} onSpeak={speak}
               onPrev={() => { if (studyIdx > 0) { setStudyIdx(studyIdx - 1); setFlipped(false); } }}
-              onNext={() => { if (studyIdx + 1 < studyDeck.length) { setStudyIdx(studyIdx + 1); setFlipped(false); } else setView('library'); }}
-            />
+              onNext={() => { if (studyIdx + 1 < studyDeck.length) { setStudyIdx(studyIdx + 1); setFlipped(false); } else setView('library'); }} />
           ) : view === 'quiz' ? (
             <QuizView cards={cards} theme={theme} dark={dark} onExit={() => setView('library')} />
           ) : view === 'stats' ? (
@@ -330,24 +332,109 @@ export default function App() {
           ) : null}
         </main>
 
-        {/* FORM */}
         {showForm && (
-          <CardForm
-            theme={theme} dark={dark} initial={editingCard}
-            onSave={data => {
-              editingCard ? updateCard({ ...editingCard, ...data }) : addCard(data);
-              setShowForm(false); setEditingCard(null);
-            }}
-            onCancel={() => { setShowForm(false); setEditingCard(null); }}
-          />
+          <CardForm theme={theme} dark={dark} initial={editingCard}
+            onSave={data => { editingCard ? updateCard({ ...editingCard, ...data }) : addCard(data); setShowForm(false); setEditingCard(null); }}
+            onCancel={() => { setShowForm(false); setEditingCard(null); }} />
         )}
 
-        {/* TOAST */}
+        {showSettings && <SettingsPanel theme={theme} dark={dark} onClose={() => setShowSettings(false)} />}
+
         {toast && (
           <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: theme.text, color: theme.bg, padding: '0.7rem 1.4rem', fontFamily: 'Fraunces,serif', fontSize: '0.95rem', borderRadius: 2, zIndex: 100, animation: 'fadeIn 0.3s', whiteSpace: 'nowrap' }}>
             {toast}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Settings Panel ────────────────────────────────────────
+function SettingsPanel({ theme, dark, onClose }) {
+  const [apiKey, setApiKey]   = useState(getApiKey());
+  const [saved, setSaved]     = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null); // null | 'ok' | 'fail'
+
+  const handleSave = () => {
+    saveApiKey(apiKey.trim());
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleTest = async () => {
+    if (!apiKey.trim()) return;
+    setTesting(true); setTestResult(null);
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey.trim(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }),
+      });
+      setTestResult(res.ok ? 'ok' : 'fail');
+    } catch { setTestResult('fail'); }
+    finally { setTesting(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+      <div onClick={e => e.stopPropagation()} className="scale-in" style={{ background: theme.surface, border: `1px solid ${theme.border}`, padding: '2rem', maxWidth: 500, width: '100%' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
+          <div>
+            <h2 className="display-font" style={{ margin: 0, fontSize: '1.7rem', fontWeight: 600, fontStyle: 'italic' }}>Settings</h2>
+            <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 4 }}>API configuration</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.text }}><X size={22} /></button>
+        </div>
+
+        {/* API Key section */}
+        <div style={{ padding: '1.25rem', background: theme.surfaceAlt, border: `1px solid ${theme.border}`, marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <Key size={16} style={{ color: theme.accent }} />
+            <div className="mono-font" style={{ fontSize: '0.7rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted }}>Anthropic API Key</div>
+          </div>
+          <p style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', color: theme.textMuted, lineHeight: 1.5 }}>
+            Required for dictionary lookup and AI example generation. Get a free key at{' '}
+            <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: theme.accent }}>console.anthropic.com</a>.
+            Your key is stored only in this browser — never sent anywhere except Anthropic.
+          </p>
+          <input
+            type="password"
+            className="input-field"
+            value={apiKey}
+            onChange={e => { setApiKey(e.target.value); setTestResult(null); }}
+            placeholder="sk-ant-..."
+            style={{ marginBottom: '0.75rem', fontFamily: 'JetBrains Mono, monospace', fontSize: '0.85rem' }}
+          />
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button className="btn btn-primary" onClick={handleSave} disabled={!apiKey.trim()}>
+              {saved ? <><CheckCircle size={14} /> Saved</> : 'Save key'}
+            </button>
+            <button className="btn" onClick={handleTest} disabled={!apiKey.trim() || testing}>
+              {testing ? <><Loader size={14} className="spin" /> Testing…</> : 'Test connection'}
+            </button>
+          </div>
+          {testResult === 'ok' && (
+            <div style={{ marginTop: '0.75rem', color: '#4A7C4A', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <CheckCircle size={14} /> API key works — lookup and AI generation are ready.
+            </div>
+          )}
+          {testResult === 'fail' && (
+            <div style={{ marginTop: '0.75rem', color: '#c1666b', fontSize: '0.9rem' }}>
+              ✗ Connection failed — check your key and try again.
+            </div>
+          )}
+        </div>
+
+        {/* Firebase note */}
+        <div style={{ padding: '1rem', background: theme.surfaceAlt, border: `1px solid ${theme.border}`, fontSize: '0.9rem', color: theme.textMuted, lineHeight: 1.5 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+            <CheckCircle size={14} style={{ color: '#4A7C4A' }} />
+            <span style={{ color: theme.text, fontWeight: 500 }}>Cloud sync is active</span>
+          </div>
+          Your cards automatically sync to Firebase — accessible from any device or browser.
+        </div>
       </div>
     </div>
   );
@@ -359,28 +446,34 @@ function CardForm({ theme, dark, initial, onSave, onCancel }) {
   const [pos,     setPos]     = useState(initial?.pos     || 'noun');
   const [meaning, setMeaning] = useState(initial?.meaning || '');
   const [example, setExample] = useState(initial?.example || '');
-
-  const [lookupState,   setLookupState]   = useState('idle'); // idle | loading | results | error
+  const [lookupState,   setLookupState]   = useState('idle');
   const [lookupResults, setLookupResults] = useState([]);
   const [selectedIdx,   setSelectedIdx]   = useState(null);
-  const [exampleState,  setExampleState]  = useState('idle'); // idle | loading | done | error
+  const [exampleState,  setExampleState]  = useState('idle');
+  const [lookupError,   setLookupError]   = useState('');
 
   const handleLookup = async () => {
+    const apiKey = getApiKey();
+    if (!apiKey) { setLookupError('No API key set — open Settings (⚙) and add your Anthropic key first.'); setLookupState('error'); return; }
     if (!word.trim()) return;
-    setLookupState('loading'); setLookupResults([]); setSelectedIdx(null);
+    setLookupState('loading'); setLookupResults([]); setSelectedIdx(null); setLookupError('');
     try {
-      const results = await lookupWord(word.trim());
-      setLookupResults(results);
-      setLookupState('results');
-      // Auto-select first result
-      setPos(results[0].pos);
-      setMeaning(results[0].meaning);
-      setExample(results[0].example || '');
-      setSelectedIdx(0);
+      const results = await lookupWord(word.trim(), apiKey);
+      setLookupResults(results); setLookupState('results');
+      setPos(results[0].pos); setMeaning(results[0].meaning); setExample(results[0].example || ''); setSelectedIdx(0);
     } catch (e) {
-      console.error(e);
+      setLookupError(e.message || 'Could not find that word.');
       setLookupState('error');
     }
+  };
+
+  const handleGenerateExample = async () => {
+    const apiKey = getApiKey();
+    if (!apiKey) { setExampleState('error'); return; }
+    if (!word.trim() || !meaning.trim()) return;
+    setExampleState('loading');
+    try { setExample(await generateExample(word.trim(), pos, meaning, apiKey)); setExampleState('done'); }
+    catch { setExampleState('error'); }
   };
 
   const selectResult = (idx) => {
@@ -388,19 +481,9 @@ function CardForm({ theme, dark, initial, onSave, onCancel }) {
     setSelectedIdx(idx); setPos(r.pos); setMeaning(r.meaning); setExample(r.example || '');
   };
 
-  const handleGenerateExample = async () => {
-    if (!word.trim() || !meaning.trim()) return;
-    setExampleState('loading');
-    try {
-      const text = await generateExample(word.trim(), pos, meaning);
-      setExample(text); setExampleState('done');
-    } catch { setExampleState('error'); }
-  };
-
   return (
     <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
       <div onClick={e => e.stopPropagation()} className="scale-in" style={{ background: theme.surface, border: `1px solid ${theme.border}`, padding: '2rem', maxWidth: 580, width: '100%', maxHeight: '92vh', overflow: 'auto' }}>
-
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
           <div>
             <h2 className="display-font" style={{ margin: 0, fontSize: '1.7rem', fontWeight: 600, fontStyle: 'italic' }}>{initial ? 'Edit entry' : 'New entry'}</h2>
@@ -410,36 +493,29 @@ function CardForm({ theme, dark, initial, onSave, onCancel }) {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-
-          {/* Word + Lookup */}
           <Field label="Word" theme={theme}>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               <input className="input-field" value={word}
-                onChange={e => { setWord(e.target.value); setLookupState('idle'); }}
+                onChange={e => { setWord(e.target.value); setLookupState('idle'); setLookupError(''); }}
                 onKeyDown={e => e.key === 'Enter' && handleLookup()}
                 autoFocus placeholder="e.g. ephemeral" style={{ flex: 1 }} />
               <button className="btn btn-primary" onClick={handleLookup}
                 disabled={!word.trim() || lookupState === 'loading'}
                 style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
-                {lookupState === 'loading' ? <Loader size={14} className="spin" /> : <Search size={14} />}
-                Look up
+                {lookupState === 'loading' ? <Loader size={14} className="spin" /> : <Search size={14} />} Look up
               </button>
             </div>
             {lookupState === 'loading' && (
-              <div className="mono-font" style={{ fontSize: '0.75rem', color: theme.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-                Searching dictionary… this takes a few seconds
-              </div>
+              <div className="mono-font" style={{ fontSize: '0.75rem', color: theme.textMuted, marginTop: 6, fontStyle: 'italic' }}>Searching… takes a few seconds</div>
             )}
           </Field>
 
-          {/* Lookup error */}
           {lookupState === 'error' && (
-            <div style={{ padding: '0.75rem 1rem', background: theme.surfaceAlt, borderLeft: `3px solid #c1666b`, fontSize: '0.95rem', color: theme.textMuted, fontStyle: 'italic' }}>
-              Could not find that word — fill in the fields manually below.
+            <div style={{ padding: '0.75rem 1rem', background: theme.surfaceAlt, borderLeft: `3px solid #c1666b`, fontSize: '0.9rem', color: theme.textMuted, lineHeight: 1.5 }}>
+              {lookupError || 'Could not find that word — fill in manually below.'}
             </div>
           )}
 
-          {/* Lookup results */}
           {lookupState === 'results' && lookupResults.length > 0 && (
             <div>
               <div className="mono-font" style={{ fontSize: '0.6rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginBottom: '0.5rem' }}>
@@ -447,11 +523,9 @@ function CardForm({ theme, dark, initial, onSave, onCancel }) {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: 220, overflow: 'auto' }}>
                 {lookupResults.map((r, i) => (
-                  <div key={i}
-                    className={`lookup-result${selectedIdx === i ? ' selected' : ''}`}
-                    onClick={() => selectResult(i)}>
+                  <div key={i} className={`lookup-result${selectedIdx === i ? ' selected' : ''}`} onClick={() => selectResult(i)}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.3rem' }}>
-                      <span className="pos-pill" style={{ background: POS_COLORS[r.pos]?.accent || theme.accent, color: dark ? '#1a1612' : '#fdf9ef', fontSize: '0.6rem' }}>{r.pos}</span>
+                      <span className="pos-pill" style={{ background: POS_COLORS[r.pos]?.accent || '#a0522d', color: dark ? '#1a1612' : '#fdf9ef', fontSize: '0.6rem' }}>{r.pos}</span>
                     </div>
                     <div style={{ fontSize: '0.95rem', lineHeight: 1.45 }}>{r.meaning}</div>
                     {r.example && <div style={{ fontSize: '0.85rem', color: theme.textMuted, fontStyle: 'italic', marginTop: '0.2rem' }}>"{r.example}"</div>}
@@ -461,33 +535,26 @@ function CardForm({ theme, dark, initial, onSave, onCancel }) {
             </div>
           )}
 
-          {/* POS */}
           <Field label="Part of speech" theme={theme}>
             <select className="input-field" value={pos} onChange={e => setPos(e.target.value)} style={{ cursor: 'pointer' }}>
               {POS_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </Field>
 
-          {/* Meaning */}
           <Field label="Meaning" theme={theme}>
             <textarea className="input-field" value={meaning} onChange={e => setMeaning(e.target.value)}
               rows={2} placeholder="What does it mean?" style={{ resize: 'vertical', fontFamily: 'inherit' }} />
           </Field>
 
-          {/* Example + AI generate */}
           <Field label="Example sentence" theme={theme} optional hint="Each line stays on its own line on the card.">
             <textarea className="input-field" value={example} onChange={e => setExample(e.target.value)}
               rows={3} placeholder="Use it in a sentence…" style={{ resize: 'vertical', fontFamily: 'inherit', fontStyle: 'italic' }} />
             <button className="btn" onClick={handleGenerateExample}
               disabled={!word.trim() || !meaning.trim() || exampleState === 'loading'}
               style={{ marginTop: '0.5rem', fontSize: '0.85rem', padding: '0.45rem 0.9rem' }}>
-              {exampleState === 'loading'
-                ? <><Loader size={13} className="spin" /> Generating…</>
-                : <><Wand2 size={13} /> AI generate examples</>}
+              {exampleState === 'loading' ? <><Loader size={13} className="spin" /> Generating…</> : <><Wand2 size={13} /> AI generate examples</>}
             </button>
-            {exampleState === 'error' && (
-              <div style={{ fontSize: '0.85rem', color: '#c1666b', marginTop: '0.3rem', fontStyle: 'italic' }}>Generation failed — try again or write manually.</div>
-            )}
+            {exampleState === 'error' && <div style={{ fontSize: '0.85rem', color: '#c1666b', marginTop: '0.3rem', fontStyle: 'italic' }}>Failed — check your API key in Settings.</div>}
           </Field>
         </div>
 
@@ -536,15 +603,13 @@ function Library({ cards, filtered, theme, dark, search, setSearch, filterPOS, s
       <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '2rem' }}>
         <div style={{ position: 'relative', flex: '1 1 280px', maxWidth: 480 }}>
           <Search size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: theme.textMuted }} />
-          <input className="input-field" placeholder="Search words, meanings, examples…" value={search}
-            onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
+          <input className="input-field" placeholder="Search words, meanings, examples…" value={search} onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
         </div>
         <select className="input-field" value={filterPOS} onChange={e => setFilterPOS(e.target.value)} style={{ flex: '0 1 180px', cursor: 'pointer' }}>
           <option value="all">All parts of speech</option>
           {POS_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
-        <button className="btn" onClick={() => setFilterFav(!filterFav)}
-          style={filterFav ? { background: theme.accent, color: '#fdf9ef', borderColor: theme.accent } : {}}>
+        <button className="btn" onClick={() => setFilterFav(!filterFav)} style={filterFav ? { background: theme.accent, color: '#fdf9ef', borderColor: theme.accent } : {}}>
           <Star size={15} fill={filterFav ? 'currentColor' : 'none'} /> Favorites
         </button>
       </div>
@@ -552,10 +617,7 @@ function Library({ cards, filtered, theme, dark, search, setSearch, filterPOS, s
         <div style={{ textAlign: 'center', padding: '3rem', color: theme.textMuted, fontStyle: 'italic' }}>No cards match your filters.</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: '1.25rem' }}>
-          {filtered.map(card => (
-            <FlashCard key={card.id} card={card} theme={theme} dark={dark}
-              onEdit={onEdit} onDelete={onDelete} onToggleFav={onToggleFav} onSpeak={onSpeak} />
-          ))}
+          {filtered.map(card => <FlashCard key={card.id} card={card} theme={theme} dark={dark} onEdit={onEdit} onDelete={onDelete} onToggleFav={onToggleFav} onSpeak={onSpeak} />)}
         </div>
       )}
     </div>
@@ -566,26 +628,15 @@ function Library({ cards, filtered, theme, dark, search, setSearch, filterPOS, s
 function CollectionView({ cards, theme, dark, onBack, onQuiz }) {
   const [search, setSearch]       = useState('');
   const [filterPOS, setFilterPOS] = useState('all');
-
   const visible = useMemo(() =>
-    [...cards]
-      .sort((a, b) => a.word.toLowerCase().localeCompare(b.word.toLowerCase()))
+    [...cards].sort((a, b) => a.word.toLowerCase().localeCompare(b.word.toLowerCase()))
       .filter(c => {
         if (filterPOS !== 'all' && c.pos !== filterPOS) return false;
-        if (search) {
-          const q = search.toLowerCase();
-          return c.word.toLowerCase().includes(q) || c.meaning.toLowerCase().includes(q) || (c.example || '').toLowerCase().includes(q);
-        }
+        if (search) { const q = search.toLowerCase(); return c.word.toLowerCase().includes(q) || c.meaning.toLowerCase().includes(q) || (c.example || '').toLowerCase().includes(q); }
         return true;
-      }),
-    [cards, search, filterPOS]);
+      }), [cards, search, filterPOS]);
 
-  if (!cards.length) return (
-    <div className="fade-in">
-      <button className="btn" onClick={onBack} style={{ marginBottom: '2rem' }}><ArrowLeft size={15} /> Back</button>
-      <EmptyState theme={theme} />
-    </div>
-  );
+  if (!cards.length) return <div className="fade-in"><button className="btn" onClick={onBack} style={{ marginBottom: '2rem' }}><ArrowLeft size={15} /> Back</button><EmptyState theme={theme} /></div>;
 
   return (
     <div className="fade-in">
@@ -598,8 +649,7 @@ function CollectionView({ cards, theme, dark, onBack, onQuiz }) {
       <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '2rem' }}>
         <div style={{ position: 'relative', flex: '1 1 280px', maxWidth: 480 }}>
           <Search size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: theme.textMuted }} />
-          <input className="input-field" placeholder="Search…" value={search}
-            onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
+          <input className="input-field" placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
         </div>
         <select className="input-field" value={filterPOS} onChange={e => setFilterPOS(e.target.value)} style={{ flex: '0 1 180px', cursor: 'pointer' }}>
           <option value="all">All parts of speech</option>
@@ -630,16 +680,11 @@ function CollectionEntry({ card, theme, dark }) {
         {card.favorite && <Star size={14} fill="#d4a574" style={{ color: '#d4a574' }} />}
       </div>
       <p style={{ margin: 0, fontSize: '1.05rem', lineHeight: 1.5 }}>{card.meaning}</p>
-      {card.example && (
-        <div style={{ marginTop: '0.6rem', fontSize: '0.95rem', lineHeight: 1.55, color: theme.textMuted, borderLeft: `2px solid ${theme.border}`, paddingLeft: '0.75rem' }}>
-          <MultilineText text={card.example} italic />
-        </div>
-      )}
+      {card.example && <div style={{ marginTop: '0.6rem', fontSize: '0.95rem', lineHeight: 1.55, color: theme.textMuted, borderLeft: `2px solid ${theme.border}`, paddingLeft: '0.75rem' }}><MultilineText text={card.example} italic /></div>}
     </div>
   );
 }
 
-// ── Shared components ─────────────────────────────────────
 function StatTile({ theme, icon, label, value, highlight }) {
   return (
     <div style={{ padding: '1.2rem 1.3rem', borderRadius: 2, background: highlight ? theme.accent : theme.surface, color: highlight ? (theme.bg === '#1a1612' ? '#1a1612' : '#fdf9ef') : theme.text, border: `1px solid ${highlight ? theme.accent : theme.border}` }}>
@@ -673,9 +718,7 @@ function FlashCard({ card, theme, dark, onEdit, onDelete, onToggleFav, onSpeak }
             <span className="pos-pill" style={{ background: accent, color: dark ? '#1a1612' : '#fdf9ef' }}>{card.pos}</span>
             <div style={{ display: 'flex', gap: '0.35rem' }}>
               <IconBtn onClick={e => { e.stopPropagation(); onSpeak(card.word); }} title="Pronounce"><Volume2 size={14} /></IconBtn>
-              <IconBtn onClick={e => { e.stopPropagation(); onToggleFav(card); }} title="Favorite">
-                <Star size={14} fill={card.favorite ? 'currentColor' : 'none'} style={{ color: card.favorite ? '#d4a574' : 'inherit' }} />
-              </IconBtn>
+              <IconBtn onClick={e => { e.stopPropagation(); onToggleFav(card); }} title="Favorite"><Star size={14} fill={card.favorite ? 'currentColor' : 'none'} style={{ color: card.favorite ? '#d4a574' : 'inherit' }} /></IconBtn>
             </div>
           </div>
           <div onClick={() => setFlipped(true)} style={{ cursor: 'pointer', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0.5rem 0' }}>
@@ -706,12 +749,10 @@ function IconBtn({ children, onClick, title }) {
   return (
     <button onClick={onClick} title={title} style={{ background: 'rgba(0,0,0,0.06)', border: 'none', width: 26, height: 26, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'inherit', transition: 'background 0.2s' }}
       onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.12)'}
-      onMouseLeave={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
-    >{children}</button>
+      onMouseLeave={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}>{children}</button>
   );
 }
 
-// ── Study View ────────────────────────────────────────────
 function StudyView({ card, idx, total, flipped, setFlipped, theme, dark, onRate, onExit, onSpeak, onPrev, onNext }) {
   if (!card) return null;
   const palette = POS_COLORS[card.pos] || POS_COLORS.noun;
@@ -778,7 +819,6 @@ function RateBtn({ theme, label, sub, color, onClick }) {
   );
 }
 
-// ── Quiz ──────────────────────────────────────────────────
 function QuizView({ cards, theme, dark, onExit }) {
   const [questions] = useState(() => {
     const shuffled = [...cards].sort(() => Math.random() - 0.5).slice(0, Math.min(10, cards.length));
@@ -797,9 +837,7 @@ function QuizView({ cards, theme, dark, onExit }) {
     return (
       <div className="fade-in" style={{ maxWidth: 520, margin: '4rem auto', textAlign: 'center' }}>
         <div className="ornament" style={{ marginBottom: '1rem' }} />
-        <h2 className="display-font" style={{ fontSize: '2.5rem', fontWeight: 600, fontStyle: 'italic', margin: '0 0 0.5rem' }}>
-          {pct >= 80 ? 'Magnificent.' : pct >= 50 ? 'Not bad.' : 'Keep at it.'}
-        </h2>
+        <h2 className="display-font" style={{ fontSize: '2.5rem', fontWeight: 600, fontStyle: 'italic', margin: '0 0 0.5rem' }}>{pct >= 80 ? 'Magnificent.' : pct >= 50 ? 'Not bad.' : 'Keep at it.'}</h2>
         <p className="display-font" style={{ fontSize: '1.4rem', color: theme.textMuted, marginBottom: '2rem' }}>You scored {score} of {questions.length}</p>
         <button className="btn btn-primary" onClick={onExit}>Back to library</button>
       </div>
@@ -811,10 +849,7 @@ function QuizView({ cards, theme, dark, onExit }) {
     if (picked) return;
     setPicked(opt);
     if (opt.id === q.correct.id) setScore(s => s + 1);
-    setTimeout(() => {
-      if (qIdx + 1 >= questions.length) setDone(true);
-      else { setQIdx(qIdx + 1); setPicked(null); }
-    }, 1100);
+    setTimeout(() => { if (qIdx + 1 >= questions.length) setDone(true); else { setQIdx(qIdx + 1); setPicked(null); } }, 1100);
   };
 
   return (
@@ -830,8 +865,7 @@ function QuizView({ cards, theme, dark, onExit }) {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
         {q.options.map((opt, i) => {
-          const isCorrect = opt.id === q.correct.id;
-          const isPicked  = picked?.id === opt.id;
+          const isCorrect = opt.id === q.correct.id, isPicked = picked?.id === opt.id;
           let bg = theme.surface, border = theme.border;
           if (picked) { if (isCorrect) { bg = '#d4e6c8'; border = '#8aa884'; } else if (isPicked) { bg = '#e6c8c8'; border = '#c1666b'; } }
           return (
@@ -839,8 +873,7 @@ function QuizView({ cards, theme, dark, onExit }) {
               style={{ padding: '1rem 1.25rem', background: bg, border: `1px solid ${border}`, color: picked && (isCorrect || isPicked) ? '#2d2418' : theme.text, fontFamily: 'Cormorant Garamond,serif', fontSize: '1.1rem', textAlign: 'left', cursor: picked ? 'default' : 'pointer', transition: 'all 0.2s', borderRadius: 2 }}
               onMouseEnter={e => { if (!picked) e.currentTarget.style.background = theme.surfaceAlt; }}
               onMouseLeave={e => { if (!picked) e.currentTarget.style.background = bg; }}>
-              <span className="mono-font" style={{ marginRight: '0.75rem', opacity: 0.5, fontSize: '0.85rem' }}>{String.fromCharCode(65 + i)}</span>
-              {opt.meaning}
+              <span className="mono-font" style={{ marginRight: '0.75rem', opacity: 0.5, fontSize: '0.85rem' }}>{String.fromCharCode(65 + i)}</span>{opt.meaning}
             </button>
           );
         })}
@@ -849,7 +882,6 @@ function QuizView({ cards, theme, dark, onExit }) {
   );
 }
 
-// ── Stats ─────────────────────────────────────────────────
 function StatsView({ cards, theme }) {
   const now    = Date.now();
   const byPOS  = POS_OPTIONS.map(p => ({ pos: p, count: cards.filter(c => c.pos === p).length })).filter(x => x.count > 0);

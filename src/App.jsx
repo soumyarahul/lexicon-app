@@ -215,8 +215,12 @@ export default function App() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); };
 
-  const addCard = (data) => {
+ const addCard = (data) => {
     if (cards.length >= MAX_CARDS) { showToast('Limit reached (1000 words)'); return; }
+    const duplicate = cards.find(
+      c => c.word.trim().toLowerCase() === data.word.trim().toLowerCase() && c.pos === data.pos
+    );
+    if (duplicate) { showToast(`"${data.word}" already exists as a ${data.pos}`); return; }
     const card = { ...data, id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), createdAt: Date.now(), favorite: false, srs: null };
     setCards(prev => [card, ...prev]);
     showToast('Card saved');

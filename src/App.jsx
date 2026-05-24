@@ -3,7 +3,7 @@ import {
   Search, Plus, Edit2, Trash2, Star, Shuffle, Volume2, X,
   Moon, Sun, BookOpen, Brain, Sparkles, ChevronLeft, ChevronRight,
   Target, Flame, TrendingUp, Library as LibraryIcon, ArrowLeft,
-  Wand2, Loader, Settings, Key, CheckCircle,
+  Wand2, Loader, Settings, Key, CheckCircle, MessageSquareQuote,
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
@@ -19,7 +19,8 @@ const firebaseApp = initializeApp({
   measurementId: "G-69H9THXTK5",
 });
 const db = getFirestore(firebaseApp);
-const CARDS_DOC = doc(db, 'lexicon', 'cards');
+const CARDS_DOC  = doc(db, 'lexicon', 'cards');
+const IDIOMS_DOC = doc(db, 'lexicon', 'idioms');   // ← new, separate doc
 
 async function loadFromFirebase() {
   const snap = await getDoc(CARDS_DOC);
@@ -32,6 +33,20 @@ async function loadFromFirebase() {
 
 async function saveToFirebase(cards) {
   await setDoc(CARDS_DOC, { cards, updatedAt: Date.now() });
+}
+
+// ── Idiom Firebase helpers ────────────────────────────────
+async function loadIdiomsFromFirebase() {
+  const snap = await getDoc(IDIOMS_DOC);
+  if (snap.exists()) {
+    const d = snap.data();
+    if (Array.isArray(d.idioms)) return d.idioms;
+  }
+  return [];
+}
+
+async function saveIdiomsToFirebase(idioms) {
+  await setDoc(IDIOMS_DOC, { idioms, updatedAt: Date.now() });
 }
 
 // ── API key (localStorage, per-device) ───────────────────
@@ -96,6 +111,45 @@ async function generateExample(word, pos, meaning, apiKey) {
   return data.content?.[0]?.text?.trim() || '';
 }
 
+// ── Idiom AI lookup ───────────────────────────────────────
+async function lookupIdiom(phrase, apiKey) {
+  const data = await claudePost({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 600,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+    messages: [{
+      role: 'user',
+      content: `Look up the English idiom or phrase "${phrase}" and return information about it.
+Respond ONLY with a raw JSON object — no markdown, no backticks, no explanation.
+The object must have exactly these keys:
+  "meaning": plain English explanation of what the idiom means
+  "example": one natural example sentence using the idiom
+  "origin": brief origin or background of the idiom (1-2 sentences), or empty string if unknown
+Example output:
+{"meaning":"To do something that causes more harm than good while trying to help","example":"By rewriting the whole module, he really let the cat out of the bag about our release date.","origin":"Possibly from 18th-century market fraud, where a piglet was switched for a cat in a bag."}`,
+    }],
+  }, apiKey);
+
+  const textBlock = [...(data.content || [])].reverse().find(b => b.type === 'text');
+  if (!textBlock?.text) throw new Error('No response from API');
+  const raw = textBlock.text.trim().replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
+  const parsed = JSON.parse(raw);
+  if (!parsed.meaning) throw new Error('Empty result');
+  return parsed;
+}
+
+async function generateIdiomExample(phrase, meaning, apiKey) {
+  const data = await claudePost({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 200,
+    messages: [{
+      role: 'user',
+      content: `Write exactly 2 clear, natural example sentences using the idiom "${phrase}" (meaning: ${meaning}). Output only the 2 sentences, one per line, no numbering, no extra text.`,
+    }],
+  }, apiKey);
+  return data.content?.[0]?.text?.trim() || '';
+}
+
 // ── SM-2 Spaced Repetition ────────────────────────────────
 function nextReview(card, quality) {
   const now = Date.now();
@@ -112,7 +166,8 @@ function nextReview(card, quality) {
 }
 
 // ── Constants ─────────────────────────────────────────────
-const MAX_CARDS = 1000;
+const MAX_CARDS  = 1000;
+const MAX_IDIOMS = 500;
 const POS_OPTIONS = ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection'];
 const POS_COLORS = {
   noun:         { bg: '#E8DDD0', text: '#5C3A21', accent: '#A0522D' },
@@ -125,7 +180,13 @@ const POS_COLORS = {
   interjection: { bg: '#E8E4D0', text: '#5C5430', accent: '#A09040' },
 };
 
-// ── CSS via JS — avoids Vite/PostCSS parsing template literals ──
+// Idiom accent — a distinct teal/slate palette, separate from POS colors
+const IDIOM_ACCENT       = '#4a7a8a';
+const IDIOM_ACCENT_DARK  = '#366070';
+const IDIOM_BG_LIGHT     = '#d8eaee';
+const IDIOM_BG_DARK      = '#1e2d32';
+
+// ── CSS via JS ────────────────────────────────────────────
 function useThemeStyles(theme, dark) {
   useEffect(() => {
     const id = 'lexicon-styles';
@@ -147,6 +208,8 @@ function useThemeStyles(theme, dark) {
       '.btn:disabled{opacity:0.4;cursor:not-allowed}',
       `.btn-primary{background:${theme.accent};color:${dark ? '#1a1612' : '#fdf9ef'};border-color:${theme.accent}}`,
       `.btn-primary:hover:not(:disabled){background:${theme.accentDark};border-color:${theme.accentDark}}`,
+      `.btn-idiom{background:${dark ? IDIOM_BG_DARK : IDIOM_BG_LIGHT};color:${dark ? '#d4eef4' : '#1e3a42'};border-color:${IDIOM_ACCENT}}`,
+      `.btn-idiom:hover:not(:disabled){background:${IDIOM_ACCENT};color:#fdf9ef;transform:translateY(-1px)}`,
       `.input-field{width:100%;padding:0.75rem 1rem;background:${theme.surface};border:1px solid ${theme.border};color:${theme.text};font-family:'Cormorant Garamond',serif;font-size:1.05rem;border-radius:2px;outline:none;transition:border-color 0.2s}`,
       `.input-field:focus{border-color:${theme.accent}}`,
       ".pos-pill{display:inline-block;padding:0.15rem 0.7rem;font-family:'JetBrains Mono',monospace;font-size:0.7rem;letter-spacing:0.12em;text-transform:uppercase;border-radius:999px}",
@@ -180,8 +243,10 @@ function MultilineText({ text, italic = true }) {
 // ── App ───────────────────────────────────────────────────
 export default function App() {
   const [cards, setCards]               = useState([]);
+  const [idioms, setIdioms]             = useState([]);
   const [loading, setLoading]           = useState(true);
   const [syncStatus, setSyncStatus]     = useState('idle');
+  const [idiomSyncStatus, setIdiomSync] = useState('idle');
   const [view, setView]                 = useState('library');
   const [dark, setDark]                 = useState(false);
   const [search, setSearch]             = useState('');
@@ -189,13 +254,17 @@ export default function App() {
   const [filterFav, setFilterFav]       = useState(false);
   const [showForm, setShowForm]         = useState(false);
   const [editingCard, setEditingCard]   = useState(null);
+  const [showIdiomForm, setShowIdiomForm]     = useState(false);
+  const [editingIdiom, setEditingIdiom]       = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [studyDeck, setStudyDeck]       = useState([]);
   const [studyIdx, setStudyIdx]         = useState(0);
   const [flipped, setFlipped]           = useState(false);
   const [toast, setToast]               = useState(null);
-  const saveTimer   = useRef(null);
-  const isFirstLoad = useRef(true);
+  const saveTimer      = useRef(null);
+  const idiomSaveTimer = useRef(null);
+  const isFirstLoad    = useRef(true);
+  const isFirstIdiom   = useRef(true);
 
   const theme = dark ? {
     bg: '#1a1612', surface: '#241e18', surfaceAlt: '#2d2620',
@@ -209,6 +278,7 @@ export default function App() {
 
   useThemeStyles(theme, dark);
 
+  // Load words
   useEffect(() => {
     loadFromFirebase()
       .then(loaded => setCards(loaded.sort((a, b) => b.createdAt - a.createdAt)))
@@ -216,6 +286,14 @@ export default function App() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Load idioms
+  useEffect(() => {
+    loadIdiomsFromFirebase()
+      .then(loaded => setIdioms(loaded.sort((a, b) => b.createdAt - a.createdAt)))
+      .catch(() => {/* silent — idioms doc might not exist yet */});
+  }, []);
+
+  // Save words
   useEffect(() => {
     if (loading) return;
     if (isFirstLoad.current) { isFirstLoad.current = false; return; }
@@ -229,8 +307,22 @@ export default function App() {
     return () => clearTimeout(saveTimer.current);
   }, [cards, loading]);
 
+  // Save idioms
+  useEffect(() => {
+    if (isFirstIdiom.current) { isFirstIdiom.current = false; return; }
+    setIdiomSync('saving');
+    clearTimeout(idiomSaveTimer.current);
+    idiomSaveTimer.current = setTimeout(() => {
+      saveIdiomsToFirebase(idioms)
+        .then(() => { setIdiomSync('saved'); setTimeout(() => setIdiomSync('idle'), 2000); })
+        .catch(() => { setIdiomSync('error'); showToast('Idiom save failed'); });
+    }, 800);
+    return () => clearTimeout(idiomSaveTimer.current);
+  }, [idioms]);
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); };
 
+  // ── Word CRUD ──────────────────────────────────────────
   const addCard = (data) => {
     if (cards.length >= MAX_CARDS) { showToast('Limit reached (1000 words)'); return; }
     const duplicate = cards.find(
@@ -256,6 +348,32 @@ export default function App() {
   const deleteCard = (id) => { setCards(prev => prev.filter(c => c.id !== id)); showToast('Card deleted'); };
   const toggleFav  = (card) => { setCards(prev => prev.map(c => c.id === card.id ? { ...c, favorite: !c.favorite } : c)); };
 
+  // ── Idiom CRUD ─────────────────────────────────────────
+  const addIdiom = (data) => {
+    if (idioms.length >= MAX_IDIOMS) { showToast('Idiom limit reached (500)'); return; }
+    const duplicate = idioms.find(
+      i => i.phrase.trim().toLowerCase() === data.phrase.trim().toLowerCase()
+    );
+    if (duplicate) { showToast(`"${data.phrase}" already exists`); return; }
+    const idiom = {
+      ...data,
+      id: 'i_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      createdAt: Date.now(),
+      favorite: false,
+    };
+    setIdioms(prev => [idiom, ...prev]);
+    showToast('Idiom saved');
+  };
+
+  const updateIdiom = (updated) => {
+    setIdioms(prev => prev.map(i => i.id === updated.id ? updated : i));
+    showToast('Idiom updated');
+  };
+
+  const deleteIdiom = (id) => { setIdioms(prev => prev.filter(i => i.id !== id)); showToast('Idiom deleted'); };
+  const toggleIdiomFav = (idiom) => { setIdioms(prev => prev.map(i => i.id === idiom.id ? { ...i, favorite: !i.favorite } : i)); };
+
+  // ── Study ──────────────────────────────────────────────
   const applyRating = (quality) => {
     const card = studyDeck[studyIdx];
     setCards(prev => prev.map(c => c.id === card.id ? { ...c, srs: nextReview(c, quality) } : c));
@@ -315,6 +433,12 @@ export default function App() {
   const syncColor = syncStatus === 'error' ? '#c1666b'
     : syncStatus === 'saved' ? '#4A7C4A' : theme.textMuted;
 
+  const idiomSyncLabel = idiomSyncStatus === 'saving' ? '↑ Saving…'
+    : idiomSyncStatus === 'saved' ? '✓ Synced'
+    : idiomSyncStatus === 'error' ? '✗ Sync failed' : '';
+
+  const isIdiomView = view === 'idioms' || view === 'idiom-collection';
+
   return (
     <div style={{ minHeight: '100vh', background: theme.bg, color: theme.text, fontFamily: '"Cormorant Garamond","EB Garamond",Georgia,serif', transition: 'background 0.4s,color 0.4s' }}>
       <div className="paper-bg" style={{ minHeight: '100vh' }}>
@@ -327,17 +451,23 @@ export default function App() {
                 <h1 className="display-font" style={{ margin: 0, fontSize: '1.7rem', fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1 }}>Lexicon</h1>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 4 }}>a vocabulary journal</div>
-                  {syncLabel && <div className="mono-font" style={{ fontSize: '0.6rem', color: syncColor, marginTop: 4 }}>{syncLabel}</div>}
+                  {syncLabel     && <div className="mono-font" style={{ fontSize: '0.6rem', color: syncColor,  marginTop: 4 }}>{syncLabel}</div>}
+                  {idiomSyncLabel && <div className="mono-font" style={{ fontSize: '0.6rem', color: IDIOM_ACCENT, marginTop: 4 }}>{idiomSyncLabel}</div>}
                 </div>
               </div>
             </div>
             <nav style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <button className="btn hide-mobile" onClick={() => setView('library')} style={view === 'library' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><BookOpen size={15} /> Library</button>
-              <button className="btn hide-mobile" onClick={() => setView('collection')} style={view === 'collection' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><LibraryIcon size={15} /> Collection</button>
-              <button className="btn hide-mobile" onClick={() => setView('stats')} style={view === 'stats' ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><TrendingUp size={15} /> Progress</button>
+              <button className="btn hide-mobile" onClick={() => setView('library')}     style={view === 'library'     ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><BookOpen size={15} /> Library</button>
+              <button className="btn hide-mobile" onClick={() => setView('collection')}  style={view === 'collection'  ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><LibraryIcon size={15} /> Collection</button>
+              <button className="btn hide-mobile" onClick={() => setView('idioms')}      style={view === 'idioms' || view === 'idiom-collection' ? { background: dark ? IDIOM_BG_DARK : IDIOM_BG_LIGHT, color: IDIOM_ACCENT, borderColor: IDIOM_ACCENT, fontWeight: 600 } : {}}><MessageSquareQuote size={15} /> Idioms</button>
+              <button className="btn hide-mobile" onClick={() => setView('stats')}       style={view === 'stats'       ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><TrendingUp size={15} /> Progress</button>
               <button className="btn" onClick={() => setShowSettings(true)} title="Settings"><Settings size={15} /></button>
               <button className="btn" onClick={() => setDark(!dark)}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
-              <button className="btn btn-primary" onClick={() => { setEditingCard(null); setShowForm(true); }} disabled={cards.length >= MAX_CARDS}><Plus size={15} /> New</button>
+              {isIdiomView ? (
+                <button className="btn btn-idiom" onClick={() => { setEditingIdiom(null); setShowIdiomForm(true); }} disabled={idioms.length >= MAX_IDIOMS}><Plus size={15} /> New idiom</button>
+              ) : (
+                <button className="btn btn-primary" onClick={() => { setEditingCard(null); setShowForm(true); }} disabled={cards.length >= MAX_CARDS}><Plus size={15} /> New</button>
+              )}
             </nav>
           </div>
           {capacityPct >= 50 && (
@@ -370,6 +500,21 @@ export default function App() {
             />
           ) : view === 'collection' ? (
             <CollectionView cards={cards} theme={theme} dark={dark} onBack={() => setView('library')} onQuiz={startQuiz} />
+          ) : view === 'idioms' ? (
+            <IdiomLibrary
+              idioms={idioms} theme={theme} dark={dark}
+              onEdit={i => { setEditingIdiom(i); setShowIdiomForm(true); }}
+              onDelete={deleteIdiom} onToggleFav={toggleIdiomFav} onSpeak={speak}
+              onCollection={() => setView('idiom-collection')}
+              onNew={() => { setEditingIdiom(null); setShowIdiomForm(true); }}
+            />
+          ) : view === 'idiom-collection' ? (
+            <IdiomCollectionView
+              idioms={idioms} theme={theme} dark={dark}
+              onBack={() => setView('idioms')}
+              onEdit={i => { setEditingIdiom(i); setShowIdiomForm(true); }}
+              onDelete={deleteIdiom} onToggleFav={toggleIdiomFav} onSpeak={speak}
+            />
           ) : view === 'study' ? (
             <StudyView
               card={studyDeck[studyIdx]} idx={studyIdx} total={studyDeck.length}
@@ -382,7 +527,7 @@ export default function App() {
           ) : view === 'quiz' ? (
             <QuizView cards={cards} theme={theme} dark={dark} onExit={() => setView('library')} />
           ) : view === 'stats' ? (
-            <StatsView cards={cards} theme={theme} />
+            <StatsView cards={cards} idioms={idioms} theme={theme} />
           ) : null}
         </main>
 
@@ -398,6 +543,21 @@ export default function App() {
               setEditingCard(null);
             }}
             onCancel={() => { setShowForm(false); setEditingCard(null); }}
+          />
+        )}
+
+        {showIdiomForm && (
+          <IdiomForm
+            theme={theme} dark={dark}
+            initial={editingIdiom}
+            existingIdioms={idioms}
+            onSave={data => {
+              if (editingIdiom) updateIdiom({ ...editingIdiom, ...data });
+              else addIdiom(data);
+              setShowIdiomForm(false);
+              setEditingIdiom(null);
+            }}
+            onCancel={() => { setShowIdiomForm(false); setEditingIdiom(null); }}
           />
         )}
 
@@ -491,14 +651,14 @@ function SettingsPanel({ theme, onClose }) {
             <CheckCircle size={14} style={{ color: '#4A7C4A' }} />
             <span style={{ color: theme.text, fontWeight: 500 }}>Cloud sync active</span>
           </div>
-          Your cards sync to Firebase automatically — accessible from any device or browser.
+          Your cards and idioms sync to Firebase automatically — accessible from any device or browser.
         </div>
       </div>
     </div>
   );
 }
 
-// ── Card Form ─────────────────────────────────────────────
+// ── Card Form (unchanged) ─────────────────────────────────
 function CardForm({ theme, dark, initial, existingCards, onSave, onCancel }) {
   const [word,    setWord]    = useState(initial?.word    || '');
   const [pos,     setPos]     = useState(initial?.pos     || 'noun');
@@ -675,6 +835,163 @@ function CardForm({ theme, dark, initial, existingCards, onSave, onCancel }) {
   );
 }
 
+// ── Idiom Form ────────────────────────────────────────────
+function IdiomForm({ theme, dark, initial, existingIdioms, onSave, onCancel }) {
+  const [phrase,  setPhrase]  = useState(initial?.phrase  || '');
+  const [meaning, setMeaning] = useState(initial?.meaning || '');
+  const [example, setExample] = useState(initial?.example || '');
+  const [origin,  setOrigin]  = useState(initial?.origin  || '');
+
+  const [lookupState,  setLookupState]  = useState('idle');
+  const [lookupError,  setLookupError]  = useState('');
+  const [exampleState, setExampleState] = useState('idle');
+
+  const duplicateExists = !initial && (existingIdioms || []).some(
+    i => i.phrase.trim().toLowerCase() === phrase.trim().toLowerCase()
+  );
+
+  const handleLookup = async () => {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      setLookupError('No API key set — open Settings (⚙) and add your Anthropic key first.');
+      setLookupState('error');
+      return;
+    }
+    if (!phrase.trim()) return;
+    setLookupState('loading'); setLookupError('');
+    try {
+      const result = await lookupIdiom(phrase.trim(), apiKey);
+      setMeaning(result.meaning || '');
+      setExample(result.example || '');
+      setOrigin(result.origin || '');
+      setLookupState('done');
+    } catch (e) {
+      setLookupError(e.message || 'Could not look up that idiom. Fill in manually below.');
+      setLookupState('error');
+    }
+  };
+
+  const handleGenerateExample = async () => {
+    const apiKey = getApiKey();
+    if (!apiKey) { setExampleState('error'); return; }
+    if (!phrase.trim() || !meaning.trim()) return;
+    setExampleState('loading');
+    try {
+      setExample(await generateIdiomExample(phrase.trim(), meaning, apiKey));
+      setExampleState('done');
+    } catch { setExampleState('error'); }
+  };
+
+  return (
+    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+      <div onClick={e => e.stopPropagation()} className="scale-in" style={{ background: theme.surface, border: `2px solid ${IDIOM_ACCENT}`, padding: '2rem', maxWidth: 580, width: '100%', maxHeight: '92vh', overflow: 'auto' }}>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+              <MessageSquareQuote size={18} style={{ color: IDIOM_ACCENT }} />
+              <h2 className="display-font" style={{ margin: 0, fontSize: '1.7rem', fontWeight: 600, fontStyle: 'italic' }}>{initial ? 'Edit idiom' : 'New idiom'}</h2>
+            </div>
+            <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 4 }}>add to your idiom collection</div>
+          </div>
+          <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.text }}><X size={22} /></button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+
+          <Field label="Idiom / phrase" theme={theme}>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                className="input-field"
+                value={phrase}
+                onChange={e => { setPhrase(e.target.value); setLookupState('idle'); setLookupError(''); }}
+                onKeyDown={e => e.key === 'Enter' && handleLookup()}
+                autoFocus placeholder="e.g. bite the bullet"
+                style={{ flex: 1 }}
+              />
+              <button
+                className="btn"
+                onClick={handleLookup}
+                disabled={!phrase.trim() || lookupState === 'loading'}
+                style={{ whiteSpace: 'nowrap', flexShrink: 0, background: IDIOM_ACCENT, color: '#fdf9ef', borderColor: IDIOM_ACCENT }}
+              >
+                {lookupState === 'loading' ? <Loader size={14} className="spin" /> : <Search size={14} />} Look up
+              </button>
+            </div>
+            {lookupState === 'loading' && (
+              <div className="mono-font" style={{ fontSize: '0.75rem', color: theme.textMuted, marginTop: 6, fontStyle: 'italic' }}>
+                Searching… takes a few seconds
+              </div>
+            )}
+            {lookupState === 'done' && (
+              <div className="mono-font" style={{ fontSize: '0.72rem', color: IDIOM_ACCENT, marginTop: 6 }}>
+                ✓ Fields filled in — review and save
+              </div>
+            )}
+          </Field>
+
+          {lookupState === 'error' && (
+            <div style={{ padding: '0.75rem 1rem', background: theme.surfaceAlt, borderLeft: `3px solid #c1666b`, fontSize: '0.9rem', color: theme.textMuted, lineHeight: 1.5 }}>
+              {lookupError}
+            </div>
+          )}
+
+          {duplicateExists && (
+            <div style={{ padding: '0.75rem 1rem', background: theme.surfaceAlt, borderLeft: '3px solid #c1666b', fontSize: '0.9rem', color: '#c1666b', lineHeight: 1.5 }}>
+              <strong>"{phrase}"</strong> already exists in your collection.
+            </div>
+          )}
+
+          <Field label="Meaning" theme={theme}>
+            <textarea className="input-field" value={meaning} onChange={e => setMeaning(e.target.value)}
+              rows={2} placeholder="What does this idiom mean?" style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+          </Field>
+
+          <Field label="Example sentence" theme={theme} optional hint="Each line stays on its own line.">
+            <textarea className="input-field" value={example} onChange={e => setExample(e.target.value)}
+              rows={3} placeholder="Use it in a sentence…" style={{ resize: 'vertical', fontFamily: 'inherit', fontStyle: 'italic' }} />
+            <button
+              className="btn"
+              onClick={handleGenerateExample}
+              disabled={!phrase.trim() || !meaning.trim() || exampleState === 'loading'}
+              style={{ marginTop: '0.5rem', fontSize: '0.85rem', padding: '0.45rem 0.9rem' }}
+            >
+              {exampleState === 'loading'
+                ? <><Loader size={13} className="spin" /> Generating…</>
+                : <><Wand2 size={13} /> AI generate examples</>}
+            </button>
+            {exampleState === 'error' && (
+              <div style={{ fontSize: '0.85rem', color: '#c1666b', marginTop: '0.3rem', fontStyle: 'italic' }}>
+                Failed — check your API key in Settings (⚙).
+              </div>
+            )}
+          </Field>
+
+          <Field label="Origin / background" theme={theme} optional hint="Where does this idiom come from?">
+            <textarea className="input-field" value={origin} onChange={e => setOrigin(e.target.value)}
+              rows={2} placeholder="e.g. 18th century naval terminology…" style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+          </Field>
+        </div>
+
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '1.8rem' }}>
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button
+            style={{ background: IDIOM_ACCENT, color: '#fdf9ef', borderColor: IDIOM_ACCENT, fontFamily: 'Fraunces,serif', fontWeight: 500, padding: '0.6rem 1.2rem', borderRadius: 2, border: `1px solid ${IDIOM_ACCENT}`, cursor: 'pointer', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem', opacity: (!phrase.trim() || !meaning.trim() || duplicateExists) ? 0.4 : 1 }}
+            onClick={() => {
+              if (phrase.trim() && meaning.trim() && !duplicateExists)
+                onSave({ phrase: phrase.trim(), meaning: meaning.trim(), example: example.trim(), origin: origin.trim() });
+            }}
+            disabled={!phrase.trim() || !meaning.trim() || duplicateExists}
+          >
+            {initial ? 'Save changes' : 'Add idiom'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Field (shared) ────────────────────────────────────────
 function Field({ label, children, theme, optional, hint }) {
   return (
     <label style={{ display: 'block' }}>
@@ -687,7 +1004,265 @@ function Field({ label, children, theme, optional, hint }) {
   );
 }
 
-// ── Library ───────────────────────────────────────────────
+// ── Idiom Library ─────────────────────────────────────────
+function IdiomLibrary({ idioms, theme, dark, onEdit, onDelete, onToggleFav, onSpeak, onCollection, onNew }) {
+  const [search, setSearch]     = useState('');
+  const [filterFav, setFilterFav] = useState(false);
+
+  const filtered = useMemo(() => idioms.filter(i => {
+    if (filterFav && !i.favorite) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return i.phrase.toLowerCase().includes(q)
+          || i.meaning.toLowerCase().includes(q)
+          || (i.example || '').toLowerCase().includes(q)
+          || (i.origin  || '').toLowerCase().includes(q);
+    }
+    return true;
+  }), [idioms, search, filterFav]);
+
+  return (
+    <div className="fade-in">
+      {/* Header band */}
+      <div style={{ marginBottom: '2rem', paddingBottom: '2rem', borderBottom: `1px solid ${theme.border}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.3rem' }}>
+          <MessageSquareQuote size={22} style={{ color: IDIOM_ACCENT }} />
+          <div className="mono-font" style={{ fontSize: '0.7rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: IDIOM_ACCENT }}>Idiom collection</div>
+        </div>
+        <h2 className="display-font" style={{ margin: 0, fontSize: '2.2rem', fontWeight: 600, fontStyle: 'italic' }}>Phrases &amp; Idioms</h2>
+        <p style={{ color: theme.textMuted, marginTop: '0.4rem', fontSize: '1rem' }}>
+          {idioms.length === 0 ? 'No idioms yet. Add your first one.' : `${idioms.length} idiom${idioms.length === 1 ? '' : 's'} collected.`}
+        </p>
+      </div>
+
+      {/* Stat tiles */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: '1rem', marginBottom: '2rem' }}>
+        <IdiomStatTile theme={theme} dark={dark} label="Collected" value={idioms.length} />
+        <IdiomStatTile theme={theme} dark={dark} label="Favorites"  value={idioms.filter(i => i.favorite).length} highlight />
+        <IdiomStatTile theme={theme} dark={dark} label="With origin" value={idioms.filter(i => i.origin?.trim()).length} />
+      </div>
+
+      {/* Action bar */}
+      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '2rem', paddingBottom: '2rem', borderBottom: `1px solid ${theme.border}` }}>
+        <button onClick={onNew} style={{ background: IDIOM_ACCENT, color: '#fdf9ef', borderColor: IDIOM_ACCENT, fontFamily: 'Fraunces,serif', fontWeight: 500, padding: '0.6rem 1.2rem', borderRadius: 2, border: `1px solid ${IDIOM_ACCENT}`, cursor: 'pointer', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem', transition: 'all 0.2s' }}>
+          <Plus size={15} /> Add idiom
+        </button>
+        <button className="btn" onClick={onCollection} disabled={!idioms.length}><LibraryIcon size={15} /> View all A–Z</button>
+      </div>
+
+      {/* Search */}
+      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '2rem' }}>
+        <div style={{ position: 'relative', flex: '1 1 280px', maxWidth: 480 }}>
+          <Search size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: theme.textMuted }} />
+          <input className="input-field" placeholder="Search idioms, meanings, examples…" value={search} onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
+        </div>
+        <button className="btn" onClick={() => setFilterFav(!filterFav)} style={filterFav ? { background: IDIOM_ACCENT, color: '#fdf9ef', borderColor: IDIOM_ACCENT } : {}}>
+          <Star size={15} fill={filterFav ? 'currentColor' : 'none'} /> Favorites
+        </button>
+      </div>
+
+      {/* Cards grid */}
+      {!idioms.length ? (
+        <IdiomEmptyState theme={theme} onNew={onNew} />
+      ) : !filtered.length ? (
+        <div style={{ textAlign: 'center', padding: '3rem', color: theme.textMuted, fontStyle: 'italic' }}>No idioms match your search.</div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: '1.25rem' }}>
+          {filtered.map(idiom => (
+            <IdiomCard key={idiom.id} idiom={idiom} theme={theme} dark={dark} onEdit={onEdit} onDelete={onDelete} onToggleFav={onToggleFav} onSpeak={onSpeak} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IdiomStatTile({ theme, dark, label, value, highlight }) {
+  const bg = highlight
+    ? (dark ? IDIOM_BG_DARK : IDIOM_BG_LIGHT)
+    : theme.surface;
+  const color = highlight ? IDIOM_ACCENT : theme.text;
+  return (
+    <div style={{ padding: '1.2rem 1.3rem', borderRadius: 2, background: bg, color, border: `1px solid ${highlight ? IDIOM_ACCENT : theme.border}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', opacity: 0.75, marginBottom: 6 }}>
+        <MessageSquareQuote size={15} />
+        <span className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{label}</span>
+      </div>
+      <div className="display-font" style={{ fontSize: '2.2rem', fontWeight: 600, lineHeight: 1, fontVariantNumeric: 'oldstyle-nums' }}>{value}</div>
+    </div>
+  );
+}
+
+function IdiomEmptyState({ theme, onNew }) {
+  return (
+    <div style={{ textAlign: 'center', padding: '5rem 1rem' }}>
+      <MessageSquareQuote size={40} style={{ color: IDIOM_ACCENT, opacity: 0.4, marginBottom: '1.5rem' }} />
+      <h2 className="display-font" style={{ fontSize: '2rem', fontWeight: 500, fontStyle: 'italic', margin: '0 0 0.5rem' }}>No idioms yet</h2>
+      <p style={{ color: theme.textMuted, fontSize: '1.05rem', maxWidth: 400, margin: '0 auto 2rem' }}>
+        Start building your collection of phrases, proverbs, and figures of speech.
+      </p>
+      <button onClick={onNew} style={{ background: IDIOM_ACCENT, color: '#fdf9ef', borderColor: IDIOM_ACCENT, fontFamily: 'Fraunces,serif', fontWeight: 500, padding: '0.7rem 1.5rem', borderRadius: 2, border: `1px solid ${IDIOM_ACCENT}`, cursor: 'pointer', fontSize: '1rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+        <Plus size={16} /> Add your first idiom
+      </button>
+    </div>
+  );
+}
+
+// ── Idiom Card ────────────────────────────────────────────
+function IdiomCard({ idiom, theme, dark, onEdit, onDelete, onToggleFav, onSpeak }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      className="scale-in"
+      style={{
+        background: dark ? theme.surface : IDIOM_BG_LIGHT,
+        border: `1px solid ${IDIOM_ACCENT}`,
+        borderLeft: `4px solid ${IDIOM_ACCENT}`,
+        padding: '1.3rem',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.6rem',
+        transition: 'box-shadow 0.2s',
+        boxShadow: dark ? 'none' : '0 4px 12px -4px rgba(74,122,138,0.18)',
+      }}
+      onMouseEnter={e => e.currentTarget.style.boxShadow = dark ? '0 0 0 1px rgba(74,122,138,0.4)' : '0 8px 24px -8px rgba(74,122,138,0.3)'}
+      onMouseLeave={e => e.currentTarget.style.boxShadow = dark ? 'none' : '0 4px 12px -4px rgba(74,122,138,0.18)'}
+    >
+      {/* Top row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <span className="pos-pill" style={{ background: IDIOM_ACCENT, color: '#fdf9ef', fontSize: '0.6rem', letterSpacing: '0.12em' }}>idiom</span>
+        <div style={{ display: 'flex', gap: '0.3rem' }}>
+          <IconBtn onClick={() => onSpeak(idiom.phrase)} title="Pronounce"><Volume2 size={13} /></IconBtn>
+          <IconBtn onClick={() => onToggleFav(idiom)} title="Favorite">
+            <Star size={13} fill={idiom.favorite ? 'currentColor' : 'none'} style={{ color: idiom.favorite ? '#d4a574' : 'inherit' }} />
+          </IconBtn>
+        </div>
+      </div>
+
+      {/* Phrase */}
+      <h3 className="display-font" style={{ margin: 0, fontSize: '1.45rem', fontWeight: 600, fontStyle: 'italic', lineHeight: 1.15, color: dark ? theme.text : IDIOM_ACCENT_DARK }}>{idiom.phrase}</h3>
+
+      {/* Meaning */}
+      <p style={{ margin: 0, fontSize: '0.97rem', lineHeight: 1.5, color: theme.text }}>{idiom.meaning}</p>
+
+      {/* Example (collapsible) */}
+      {idiom.example && (
+        <div style={{ fontSize: '0.9rem', color: theme.textMuted, borderLeft: `2px solid ${IDIOM_ACCENT}`, paddingLeft: '0.75rem', lineHeight: 1.55 }}>
+          <MultilineText text={idiom.example} italic />
+        </div>
+      )}
+
+      {/* Origin (expandable) */}
+      {idiom.origin && (
+        <div>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: IDIOM_ACCENT, fontFamily: 'JetBrains Mono,monospace', fontSize: '0.65rem', letterSpacing: '0.15em', textTransform: 'uppercase', padding: 0, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+          >
+            {expanded ? '▲' : '▼'} Origin
+          </button>
+          {expanded && (
+            <div style={{ marginTop: '0.5rem', fontSize: '0.88rem', color: theme.textMuted, fontStyle: 'italic', lineHeight: 1.5 }}>
+              {idiom.origin}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Footer actions */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.3rem', marginTop: '0.2rem', borderTop: `1px solid ${dark ? theme.border : 'rgba(74,122,138,0.2)'}`, paddingTop: '0.6rem' }}>
+        <IconBtn onClick={() => onEdit(idiom)} title="Edit"><Edit2 size={12} /></IconBtn>
+        <IconBtn onClick={() => { if (confirm('Delete this idiom?')) onDelete(idiom.id); }} title="Delete"><Trash2 size={12} /></IconBtn>
+      </div>
+    </div>
+  );
+}
+
+// ── Idiom Collection View (A–Z) ───────────────────────────
+function IdiomCollectionView({ idioms, theme, dark, onBack, onEdit, onDelete, onToggleFav, onSpeak }) {
+  const [search, setSearch] = useState('');
+
+  const visible = useMemo(() =>
+    [...idioms]
+      .sort((a, b) => a.phrase.toLowerCase().localeCompare(b.phrase.toLowerCase()))
+      .filter(i => {
+        if (!search) return true;
+        const q = search.toLowerCase();
+        return i.phrase.toLowerCase().includes(q) || i.meaning.toLowerCase().includes(q) || (i.example || '').toLowerCase().includes(q);
+      }),
+    [idioms, search]);
+
+  return (
+    <div className="fade-in">
+      <button className="btn" onClick={onBack} style={{ marginBottom: '2rem' }}><ArrowLeft size={15} /> Back to idioms</button>
+      <div style={{ marginBottom: '2.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.3rem' }}>
+          <MessageSquareQuote size={16} style={{ color: IDIOM_ACCENT }} />
+          <div className="mono-font" style={{ fontSize: '0.7rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: IDIOM_ACCENT }}>A–Z index</div>
+        </div>
+        <h2 className="display-font" style={{ margin: 0, fontSize: '2.5rem', fontWeight: 600, fontStyle: 'italic' }}>All idioms</h2>
+        <p style={{ color: theme.textMuted, marginTop: '0.5rem', fontSize: '1.05rem' }}>{idioms.length} {idioms.length === 1 ? 'phrase' : 'phrases'}, sorted alphabetically.</p>
+      </div>
+
+      <div style={{ position: 'relative', maxWidth: 480, marginBottom: '2rem' }}>
+        <Search size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: theme.textMuted }} />
+        <input className="input-field" placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} style={{ paddingLeft: 40 }} />
+      </div>
+
+      {!visible.length ? (
+        <div style={{ textAlign: 'center', padding: '3rem', color: theme.textMuted, fontStyle: 'italic' }}>No matches.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {visible.map(i => (
+            <IdiomCollectionEntry key={i.id} idiom={i} theme={theme} dark={dark} onEdit={onEdit} onDelete={onDelete} onToggleFav={onToggleFav} onSpeak={onSpeak} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IdiomCollectionEntry({ idiom, theme, dark, onEdit, onDelete, onToggleFav, onSpeak }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderLeft: `3px solid ${IDIOM_ACCENT}`, padding: '1.25rem 1.5rem', transition: 'transform 0.15s' }}
+      onMouseEnter={e => e.currentTarget.style.transform = 'translateX(2px)'}
+      onMouseLeave={e => e.currentTarget.style.transform = 'translateX(0)'}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.4rem' }}>
+        <h3 className="display-font" style={{ margin: 0, fontSize: '1.5rem', fontWeight: 600, fontStyle: 'italic', color: IDIOM_ACCENT_DARK }}>{idiom.phrase}</h3>
+        <span className="pos-pill" style={{ background: IDIOM_ACCENT, color: '#fdf9ef', fontSize: '0.58rem' }}>idiom</span>
+        {idiom.favorite && <Star size={14} fill="#d4a574" style={{ color: '#d4a574' }} />}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.3rem' }}>
+          <IconBtn onClick={() => onSpeak(idiom.phrase)} title="Pronounce"><Volume2 size={13} /></IconBtn>
+          <IconBtn onClick={() => onToggleFav(idiom)} title="Favorite"><Star size={13} fill={idiom.favorite ? 'currentColor' : 'none'} style={{ color: idiom.favorite ? '#d4a574' : 'inherit' }} /></IconBtn>
+          <IconBtn onClick={() => onEdit(idiom)} title="Edit"><Edit2 size={12} /></IconBtn>
+          <IconBtn onClick={() => { if (confirm('Delete this idiom?')) onDelete(idiom.id); }} title="Delete"><Trash2 size={12} /></IconBtn>
+        </div>
+      </div>
+      <p style={{ margin: 0, fontSize: '1.02rem', lineHeight: 1.5 }}>{idiom.meaning}</p>
+      {idiom.example && (
+        <div style={{ marginTop: '0.6rem', fontSize: '0.93rem', color: theme.textMuted, borderLeft: `2px solid ${theme.border}`, paddingLeft: '0.75rem', lineHeight: 1.55 }}>
+          <MultilineText text={idiom.example} italic />
+        </div>
+      )}
+      {idiom.origin && (
+        <div style={{ marginTop: '0.5rem' }}>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: IDIOM_ACCENT, fontFamily: 'JetBrains Mono,monospace', fontSize: '0.63rem', letterSpacing: '0.15em', textTransform: 'uppercase', padding: 0 }}
+          >
+            {expanded ? '▲' : '▼'} Origin
+          </button>
+          {expanded && <div style={{ marginTop: '0.4rem', fontSize: '0.88rem', color: theme.textMuted, fontStyle: 'italic' }}>{idiom.origin}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Library (unchanged) ───────────────────────────────────
 function Library({ cards, filtered, theme, dark, search, setSearch, filterPOS, setFilterPOS, filterFav, setFilterFav, onEdit, onDelete, onToggleFav, onSpeak, onStudy, onQuiz, onCollection, dueCount }) {
   return (
     <div className="fade-in">
@@ -730,7 +1305,7 @@ function Library({ cards, filtered, theme, dark, search, setSearch, filterPOS, s
   );
 }
 
-// ── Collection View ───────────────────────────────────────
+// ── Collection View (unchanged) ───────────────────────────
 function CollectionView({ cards, theme, dark, onBack, onQuiz }) {
   const [search, setSearch]       = useState('');
   const [filterPOS, setFilterPOS] = useState('all');
@@ -1011,7 +1586,8 @@ function QuizView({ cards, theme, dark, onExit }) {
   );
 }
 
-function StatsView({ cards, theme }) {
+// ── Stats View (idiom count added) ────────────────────────
+function StatsView({ cards, idioms, theme }) {
   const now    = Date.now();
   const byPOS  = POS_OPTIONS.map(p => ({ pos: p, count: cards.filter(c => c.pos === p).length })).filter(x => x.count > 0);
   const maxPOS = Math.max(1, ...byPOS.map(x => x.count));
@@ -1023,9 +1599,11 @@ function StatsView({ cards, theme }) {
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '1rem', marginBottom: '3rem' }}>
         <BigStat theme={theme} value={cards.length}                                                   label="Total words" />
+        <BigStat theme={theme} value={idioms.length}                                                  label="Total idioms" accent={IDIOM_ACCENT} />
         <BigStat theme={theme} value={cards.filter(c => c.srs?.reps > 0).length}                     label="Reviewed"    />
         <BigStat theme={theme} value={cards.filter(c => (c.srs?.reps || 0) >= 4).length}             label="Mastered"    />
-        <BigStat theme={theme} value={cards.filter(c => c.favorite).length}                          label="Favorites"   />
+        <BigStat theme={theme} value={cards.filter(c => c.favorite).length}                          label="Fav words"   />
+        <BigStat theme={theme} value={idioms.filter(i => i.favorite).length}                         label="Fav idioms"  accent={IDIOM_ACCENT} />
         <BigStat theme={theme} value={cards.filter(c => !c.srs?.dueAt || c.srs.dueAt <= now).length} label="Due now"     />
       </div>
       {byPOS.length > 0 && (
@@ -1046,15 +1624,15 @@ function StatsView({ cards, theme }) {
           </div>
         </div>
       )}
-      {!cards.length && <div style={{ textAlign: 'center', padding: '3rem', color: theme.textMuted, fontStyle: 'italic' }}>Add some words first to see your progress.</div>}
+      {!cards.length && !idioms.length && <div style={{ textAlign: 'center', padding: '3rem', color: theme.textMuted, fontStyle: 'italic' }}>Add some words or idioms first to see your progress.</div>}
     </div>
   );
 }
 
-function BigStat({ theme, value, label }) {
+function BigStat({ theme, value, label, accent }) {
   return (
-    <div style={{ padding: '1.25rem', background: theme.surface, border: `1px solid ${theme.border}` }}>
-      <div className="display-font" style={{ fontSize: '2.5rem', fontWeight: 600, lineHeight: 1, fontVariantNumeric: 'oldstyle-nums' }}>{value}</div>
+    <div style={{ padding: '1.25rem', background: theme.surface, border: `1px solid ${accent || theme.border}`, borderTop: accent ? `3px solid ${accent}` : undefined }}>
+      <div className="display-font" style={{ fontSize: '2.5rem', fontWeight: 600, lineHeight: 1, fontVariantNumeric: 'oldstyle-nums', color: accent || theme.text }}>{value}</div>
       <div className="mono-font" style={{ fontSize: '0.65rem', letterSpacing: '0.15em', textTransform: 'uppercase', color: theme.textMuted, marginTop: 6 }}>{label}</div>
     </div>
   );

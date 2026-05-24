@@ -457,10 +457,10 @@ export default function App() {
               </div>
             </div>
             <nav style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <button className="btn hide-mobile" onClick={() => setView('library')}     style={view === 'library'     ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><BookOpen size={15} /> Library</button>
-              <button className="btn hide-mobile" onClick={() => setView('collection')}  style={view === 'collection'  ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><LibraryIcon size={15} /> Collection</button>
-              <button className="btn hide-mobile" onClick={() => setView('idioms')}      style={view === 'idioms' || view === 'idiom-collection' ? { background: dark ? IDIOM_BG_DARK : IDIOM_BG_LIGHT, color: IDIOM_ACCENT, borderColor: IDIOM_ACCENT, fontWeight: 600 } : {}}><MessageSquareQuote size={15} /> Idioms</button>
-              <button className="btn hide-mobile" onClick={() => setView('stats')}       style={view === 'stats'       ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><TrendingUp size={15} /> Progress</button>
+              <button className="btn" onClick={() => setView('library')}     style={view === 'library'     ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><BookOpen size={15} /> Library</button>
+              <button className="btn" onClick={() => setView('collection')}  style={view === 'collection'  ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><LibraryIcon size={15} /> Collection</button>
+              <button className="btn" onClick={() => setView('idioms')}      style={view === 'idioms' || view === 'idiom-collection' ? { background: dark ? IDIOM_BG_DARK : IDIOM_BG_LIGHT, color: IDIOM_ACCENT, borderColor: IDIOM_ACCENT, fontWeight: 600 } : {}}><MessageSquareQuote size={15} /> Idioms</button>
+              <button className="btn" onClick={() => setView('stats')}       style={view === 'stats'       ? { background: theme.surfaceAlt, fontWeight: 600 } : {}}><TrendingUp size={15} /> Progress</button>
               <button className="btn" onClick={() => setShowSettings(true)} title="Settings"><Settings size={15} /></button>
               <button className="btn" onClick={() => setDark(!dark)}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
               {isIdiomView ? (

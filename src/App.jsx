@@ -75,7 +75,7 @@ async function claudePost(body, apiKey) {
 
 async function lookupWord(word, apiKey) {
   const data = await claudePost({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 800,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }],
     messages: [{
@@ -101,7 +101,7 @@ Include up to 3 definitions. Example output:
 
 async function generateExample(word, pos, meaning, apiKey) {
   const data = await claudePost({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 200,
     messages: [{
       role: 'user',
@@ -114,7 +114,7 @@ async function generateExample(word, pos, meaning, apiKey) {
 // ── Idiom AI lookup ───────────────────────────────────────
 async function lookupIdiom(phrase, apiKey) {
   const data = await claudePost({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 600,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }],
     messages: [{
@@ -140,7 +140,7 @@ Example output:
 
 async function generateIdiomExample(phrase, meaning, apiKey) {
   const data = await claudePost({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 200,
     messages: [{
       role: 'user',
@@ -598,7 +598,7 @@ function SettingsPanel({ theme, onClose }) {
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }),
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }),
       });
       setTestResult(res.ok ? 'ok' : 'fail');
     } catch { setTestResult('fail'); }
